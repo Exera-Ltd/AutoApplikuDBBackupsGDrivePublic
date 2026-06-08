@@ -39,6 +39,7 @@ jobs:
         env:
           APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
           APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          ANON_SALT: ${{ secrets.ANON_SALT }}
           ONLY_APP: ${{ github.event.inputs.only_app }}
         run: python3 scripts/discover.py
 
