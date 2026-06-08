@@ -8,14 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       app:
-        description: 'App to restore (the ApplikuBackups/<app> folder name)'
+        description: 'Database to restore — its opaque id (db-..., from the Actions tab / email)'
         required: true
       file:
-        description: 'Dump filename (blank = newest in the app folder)'
+        description: 'Dump filename (blank = newest in the folder)'
         required: false
         default: ''
       confirm:
-        description: 'Type the app name EXACTLY to perform a real restore (else dry run)'
+        description: 'Type the id EXACTLY to perform a real restore (else dry run)'
         required: false
         default: ''
       target_url:
@@ -69,6 +69,7 @@ jobs:
         env:
           APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
           APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          ANON_SALT: ${{ secrets.ANON_SALT }}
           APP: ${{ github.event.inputs.app }}
           FILE: ${{ github.event.inputs.file }}
           CONFIRM: ${{ github.event.inputs.confirm }}

@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Dump one Postgres database, gzip it, upload to Google Drive, prune old dumps.
 #
-#   backup_one.sh <app> <db_url>
+#   backup_one.sh <id> <app> <db_url>
 #
-# Writes a status JSON file (status_<app>.json) describing the outcome so the
-# notify job can assemble the email summary. Never prints the db_url.
+#   <id>      opaque public identifier (db-....). Used for ALL human-visible
+#             output and for the status filename, because this runs in a PUBLIC
+#             repo whose logs/artifacts are world-readable.
+#   <app>     real app slug. Used ONLY for the (private) Google Drive folder and
+#             the dump filename. Masked on entry so it can never leak to logs.
+#   <db_url>  Postgres connection URL. Masked on entry; never printed.
+#
+# Writes a status JSON file (status_<id>.json) keyed by the opaque id and
+# containing NO real name, so the artifact is safe to expose publicly. The
+# notify job maps the id back to the real name when building the email.
 #
 # Env:
 #   RCLONE_REMOTE  default "gdrive"
@@ -13,8 +21,11 @@
 #   MIN_BYTES      reject dumps smaller than this (sanity check), default 100
 set -u -o pipefail
 
-APP="${1:?usage: backup_one.sh <app> <db_url>}"
-DB_URL="${2:?usage: backup_one.sh <app> <db_url>}"
+ID="${1:?usage: backup_one.sh <id> <app> <db_url>}"
+APP="${2:?usage: backup_one.sh <id> <app> <db_url>}"
+DB_URL="${3:?usage: backup_one.sh <id> <app> <db_url>}"
+# Defence in depth: redact the real app name and the url from this public log.
+echo "::add-mask::${APP}"
 echo "::add-mask::${DB_URL}"
 
 REMOTE="${RCLONE_REMOTE:-gdrive}"
@@ -23,26 +34,29 @@ KEEP="${KEEP:-48}"
 MIN_BYTES="${MIN_BYTES:-100}"
 
 STAMP="$(date -u +%Y-%m-%d_%H%MZ)"
-FILE="db_${APP}_${STAMP}.sql.gz"
+FILE="db_${APP}_${STAMP}.sql.gz"          # real name -> private Drive only
 DEST="${REMOTE}:${BASE}/${APP}/${FILE}"
-STATUS="status_${APP}.json"
+STATUS="status_${ID}.json"                # public artifact -> opaque id only
 SECONDS=0
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+write_status() { # ok bytes error
+  python3 - "$ID" "$1" "$2" "$SECONDS" "$3" >"$STATUS" <<'PY'
+import json, sys
+oid, ok, b, dur, err = sys.argv[1], sys.argv[2] == "true", int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+json.dump({"id": oid, "ok": ok, "bytes": b, "duration": dur, "error": err}, open(1, "w"))
+PY
+}
+
 fail() {
   local msg="$1"
-  echo "✗ ${APP}: ${msg}" >&2
-  python3 - "$APP" "$msg" "$SECONDS" "$FILE" >"$STATUS" <<'PY'
-import json, sys
-app, err, dur, fn = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-json.dump({"app": app, "ok": False, "bytes": 0, "file": fn,
-           "duration": dur, "error": err}, open(1, "w"))
-PY
+  echo "✗ ${ID}: ${msg}" >&2
+  write_status false 0 "$msg"
   exit 1
 }
 
-echo "→ ${APP}: dumping to ${FILE}"
+echo "→ ${ID}: dumping"
 # pipefail makes a pg_dump failure abort the pipeline even though gzip succeeds.
 if ! pg_dump --no-owner --no-privileges "${DB_URL}" | gzip -9 > "${FILE}"; then
   fail "pg_dump failed"
@@ -54,7 +68,7 @@ echo "  size: ${BYTES} bytes"
 # Integrity: the gzip must be readable end to end.
 gzip -t "${FILE}" || fail "gzip integrity check failed"
 
-echo "  uploading to ${DEST}"
+echo "  uploading dump"
 rclone copyto "${FILE}" "${DEST}" --drive-use-trash=false || fail "rclone upload failed"
 
 # Prune is best-effort and must not flip a good backup to failed.
@@ -62,10 +76,5 @@ python3 "${here}/prune.py" "${APP}" "${KEEP}" || echo "  WARN: prune reported an
 
 rm -f "${FILE}"
 
-echo "✓ ${APP}: ${BYTES} bytes in ${SECONDS}s"
-python3 - "$APP" "$BYTES" "$SECONDS" "$FILE" >"$STATUS" <<'PY'
-import json, sys
-app, b, dur, fn = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
-json.dump({"app": app, "ok": True, "bytes": b, "file": fn,
-           "duration": dur, "error": ""}, open(1, "w"))
-PY
+echo "✓ ${ID}: ${BYTES} bytes in ${SECONDS}s"
+write_status true "$BYTES" ""

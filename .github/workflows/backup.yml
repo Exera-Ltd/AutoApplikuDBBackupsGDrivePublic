@@ -51,7 +51,8 @@ jobs:
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.discover.outputs.matrix).include }}
-    name: backup-${{ matrix.app }}
+    # Public job name uses the opaque id only — never a client/app name.
+    name: backup-${{ matrix.id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -84,25 +85,35 @@ jobs:
           echo "$RCLONE_CONF_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
           rclone listremotes
 
-      - name: Back up ${{ matrix.app }}
+      - name: Back up ${{ matrix.id }}
         env:
           APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
           APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          ANON_SALT: ${{ secrets.ANON_SALT }}
+          ID: ${{ matrix.id }}
           KEEP: '48'
         run: |
           set -euo pipefail
-          # Resolve the public connection URL at runtime (kept out of the matrix
-          # so it never lands in a job output or the run UI).
-          url="$(python3 scripts/discover.py --resolve "${{ matrix.app }}")"
+          # Resolve the real app slug and connection URL at runtime from the
+          # opaque id (neither is in the matrix, so they never land in a job
+          # output or the run UI). `set -e` aborts here if resolution fails,
+          # rather than proceeding with empty values. Mask BOTH immediately so
+          # they can never leak into this public repo's logs.
+          leg_out="$(python3 scripts/discover.py --leg "$ID")"
+          app="$(printf '%s\n' "$leg_out" | head -1)"
+          url="$(printf '%s\n' "$leg_out" | tail -1)"
+          echo "::add-mask::$app"
           echo "::add-mask::$url"
-          bash scripts/backup_one.sh "${{ matrix.app }}" "$url"
+          [ -n "$app" ] && [ -n "$url" ] || { echo "could not resolve $ID" >&2; exit 1; }
+          bash scripts/backup_one.sh "$ID" "$app" "$url"
 
       - name: Upload status artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: status-${{ matrix.app }}
-          path: status_${{ matrix.app }}.json
+          # Artifact name + contents are keyed by the opaque id only.
+          name: status-${{ matrix.id }}
+          path: status_${{ matrix.id }}.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -124,6 +135,13 @@ jobs:
       - name: Build summary
         id: sum
         env:
+          # The token/team/salt let build_summary map opaque ids back to real
+          # app names — but ONLY inside the email body (a private channel).
+          # Real names are never written to stdout here, so the public notify
+          # log stays clean.
+          APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
+          APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          ANON_SALT: ${{ secrets.ANON_SALT }}
           ALWAYS_EMAIL: ${{ vars.ALWAYS_EMAIL || 'false' }}
           DIGEST_HOUR: ${{ vars.DIGEST_HOUR || '6' }}
           EVENT_NAME: ${{ github.event_name }}

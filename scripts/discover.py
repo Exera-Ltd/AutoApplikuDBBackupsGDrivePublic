@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
 """Enumerate Appliku-hosted Postgres databases with external access.
 
-Two modes:
+Because this runs in a PUBLIC repository, the GitHub-visible surface (job
+matrix, job names, logs, artifacts) must never reveal real application names.
+Every database is therefore addressed publicly by an opaque, stable id
+(``db-<hash>``); the real app name is used only in private channels (the Google
+Drive folder and the summary email).
+
+Modes:
 
   discover.py                 Print a GitHub Actions matrix to $GITHUB_OUTPUT
-                              (and to stdout) of every externally-reachable
-                              Postgres datastore: {"include":[{app, db_url}, ...]}.
+                              (and to stdout) of opaque ids only:
+                              {"include":[{"id":"db-...."}, ...]}.
 
-  discover.py --resolve APP   Print the public connection_url for a single app
-                              (used by the restore workflow). Exits non-zero if
-                              the app has no external Postgres datastore.
+  discover.py --leg ID        Print TWO lines for one database: the real app
+                              slug, then its connection_url. Used by the backup
+                              leg, which masks BOTH before use. Nothing is
+                              printed if the id is unknown (exit non-zero).
 
-Selection rule (per Appliku account, verified live):
+  discover.py --resolve TGT   Print only the connection_url for TGT (an id, a
+                              slug, or a bare app name). Used by restore.
+
+  discover.py --name TGT      Print only the real app slug for TGT (id/slug/
+                              name). Used by restore to locate the Drive folder.
+                              The caller masks it.
+
+Selection rule:
   GET /api/team/<TEAM>/applications/list/        -> all applications
   GET /api/team/<TEAM>/applications/<id>/datastores
      keep datastores where kind == "database"
@@ -21,11 +35,17 @@ Selection rule (per Appliku account, verified live):
 Environment:
   APPLIKU_TOKEN   (required) Appliku API token (Authorization: Token <...>)
   APPLIKU_TEAM    (required) Appliku team slug (the <TEAM> in the API paths above)
-  ONLY_APP        (optional) restrict matrix to a single app name (blank = all)
+  ANON_SALT       (optional) salt for the opaque id hash; defaults to
+                  APPLIKU_TOKEN. Set a dedicated value to keep ids stable
+                  across API-token rotations.
+  ONLY_APP        (optional) restrict the matrix to one database, given as its
+                  opaque id, slug, or app name (blank = all).
 
-Excludes: app names listed in config/exclude.txt (one per line, '#' comments).
-The db_url is registered as a GitHub Actions mask so it never prints in logs.
+Excludes: app names/slugs listed in config/exclude.txt (one per line).
+Real app names and db_urls never reach stdout except via --leg/--resolve/--name,
+whose callers immediately register a GitHub `::add-mask::` for the value.
 """
+import hashlib
 import json
 import os
 import sys
@@ -35,6 +55,18 @@ import urllib.error
 API_ROOT = "https://api.appliku.com/api/team"
 TEAM = os.environ.get("APPLIKU_TEAM", "")
 TOKEN = os.environ.get("APPLIKU_TOKEN", "")
+SALT = os.environ.get("ANON_SALT") or TOKEN
+
+
+def anon_id(slug):
+    """Opaque, stable public identifier for a database slug.
+
+    A salted SHA-256 keeps real names out of the public GitHub surface and
+    prevents an outsider from reversing the (guessable) app names by brute
+    force, as long as ANON_SALT (or the API token) stays secret.
+    """
+    digest = hashlib.sha256(("%s|%s" % (SALT, slug)).encode("utf-8")).hexdigest()
+    return "db-" + digest[:12]
 
 
 def _api(path):
@@ -68,7 +100,9 @@ def iter_databases():
         try:
             datastores = _api("/applications/%s/datastores" % app_id)
         except urllib.error.HTTPError as exc:
-            sys.stderr.write("WARN: datastores fetch failed for %s: %s\n" % (app_name, exc))
+            # Don't leak the app name on a public runner; log by anonymized id.
+            sys.stderr.write("WARN: datastores fetch failed for %s: %s\n"
+                             % (anon_id(app_name), exc))
             continue
         for ds in datastores:
             if ds.get("kind") != "database":
@@ -84,7 +118,7 @@ def slugged_databases():
     """Like iter_databases but with a unique slug per DB.
 
     Single-DB apps keep the bare app name; apps with more than one external DB
-    get "<app>_<datastore_id>" so folders/files/jobs never collide.
+    get "<app>_<datastore_id>" so folders/files never collide.
     Yields (slug, app_name, url).
     """
     rows = list(iter_databases())
@@ -96,18 +130,49 @@ def slugged_databases():
         yield slug, name, url
 
 
-def resolve(target):
-    """Print the DB url for a slug (preferred) or bare app name, nothing else.
-
-    Stdout is exactly the url so callers can capture it with $(...). The caller
-    is responsible for registering an `::add-mask::` before using it.
-    """
+def _find(target):
+    """Return (slug, name, url) for a target given as opaque id, slug, or name."""
     for slug, name, url in slugged_databases():
-        if target in (slug, name):
-            print(url)
-            return 0
-    sys.stderr.write("ERROR: no external Postgres datastore found for '%s'\n" % target)
-    return 1
+        if target in (anon_id(slug), slug, name):
+            return slug, name, url
+    return None
+
+
+def id_name_map():
+    """Map opaque id -> real slug, for building the (private) email summary."""
+    return {anon_id(slug): slug for slug, _name, _url in slugged_databases()}
+
+
+def leg(target):
+    """Print real slug then url (two lines) for one database. Caller masks both."""
+    found = _find(target)
+    if not found:
+        sys.stderr.write("ERROR: no external Postgres datastore for '%s'\n" % target)
+        return 1
+    slug, _name, url = found
+    print(slug)
+    print(url)
+    return 0
+
+
+def resolve(target):
+    """Print only the connection_url for a target (id/slug/name). Caller masks it."""
+    found = _find(target)
+    if not found:
+        sys.stderr.write("ERROR: no external Postgres datastore for '%s'\n" % target)
+        return 1
+    print(found[2])
+    return 0
+
+
+def name_of(target):
+    """Print only the real slug for a target (id/slug/name). Caller masks it."""
+    found = _find(target)
+    if not found:
+        sys.stderr.write("ERROR: no external Postgres datastore for '%s'\n" % target)
+        return 1
+    print(found[0])
+    return 0
 
 
 def build_matrix():
@@ -115,18 +180,20 @@ def build_matrix():
     excludes = load_excludes()
     include = []
     for slug, name, _url in slugged_databases():
-        # `only` may be given as either the app name or a specific slug.
-        if only and only not in (slug, name):
+        oid = anon_id(slug)
+        # `only` may be given as the opaque id, the app name, or a specific slug.
+        if only and only not in (oid, slug, name):
             continue
         if name in excludes or slug in excludes:
-            sys.stderr.write("skip (excluded): %s\n" % slug)
+            sys.stderr.write("skip (excluded): %s\n" % oid)
             continue
-        # IMPORTANT: the matrix must NOT contain the db_url. A masked value in a
-        # job output makes GitHub silently drop the whole output ("Skip output
-        # ... may contain secret"). Each backup leg re-resolves its own url.
-        include.append({"app": slug})
+        # The matrix carries ONLY the opaque id: no app name (public job names /
+        # logs / artifacts must not reveal clients) and no db_url (a masked value
+        # in a job output makes GitHub drop the whole output). Each backup leg
+        # re-resolves its own slug+url from the id at runtime.
+        include.append({"id": oid})
 
-    include.sort(key=lambda d: d["app"])
+    include.sort(key=lambda d: d["id"])
     matrix = {"include": include}
     payload = json.dumps(matrix, separators=(",", ":"))
 
@@ -135,9 +202,9 @@ def build_matrix():
         with open(out, "a") as fh:
             fh.write("matrix=%s\n" % payload)
             fh.write("count=%d\n" % len(include))
-    # Human-readable echo (app names only; urls are masked).
+    # Human-readable echo: opaque ids only (real names are never logged).
     sys.stderr.write("discovered %d database(s): %s\n" % (
-        len(include), ", ".join(d["app"] for d in include)))
+        len(include), ", ".join(d["id"] for d in include)))
     print(payload)
     return 0 if include else 1
 
@@ -149,11 +216,15 @@ def main(argv):
     if not TEAM:
         sys.stderr.write("ERROR: APPLIKU_TEAM is not set\n")
         return 2
-    if len(argv) >= 2 and argv[1] == "--resolve":
+    if len(argv) >= 2 and argv[1] in ("--leg", "--resolve", "--name"):
         if len(argv) < 3:
-            sys.stderr.write("usage: discover.py --resolve <app>\n")
+            sys.stderr.write("usage: discover.py %s <id|slug|app>\n" % argv[1])
             return 2
-        return resolve(argv[2])
+        if argv[1] == "--leg":
+            return leg(argv[2])
+        if argv[1] == "--resolve":
+            return resolve(argv[2])
+        return name_of(argv[2])
     return build_matrix()
 
 

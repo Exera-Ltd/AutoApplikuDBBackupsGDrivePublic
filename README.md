@@ -16,6 +16,13 @@ All account-specific values (team slug, email addresses, SMTP host) are supplied
 at runtime via **GitHub Actions secrets and variables** — nothing identifying is
 committed to this repository.
 
+> **Privacy on a public repo.** App names are fetched live from the Appliku API,
+> so they must not surface on this public repo's world-readable Actions pages.
+> Every database is addressed on the public surface (job matrix, **job names**,
+> **logs**, **artifacts**) by an opaque, stable id `db-<hash>`. Real app names
+> appear only in **private** channels: your Google Drive folder names and the
+> summary email (which lists each app next to its id). See *Anonymization* below.
+
 ---
 
 ## How it works
@@ -59,6 +66,26 @@ can dump older servers, never the reverse).
 New projects are picked up automatically every run; nothing to edit when you add
 an app. To skip an app, add its name (or slug) to `config/exclude.txt`.
 
+### Anonymization (public-repo privacy)
+
+`discover.py` derives a stable opaque id `db-<hash>` (salted SHA-256 of the app
+slug) for each database and that is the **only** thing placed on GitHub's public
+surface:
+
+- the job **matrix** carries `{"id": "db-..."}` — no app name, no db_url;
+- each backup **job name** is `backup-db-...`;
+- each backup leg resolves its real slug + db_url from the id at runtime and
+  immediately `::add-mask::`s **both**, so neither can appear in the public log;
+- status **artifacts** are named `status-db-...` and contain only the id.
+
+Real app names are used only where they're private: the **Google Drive** folder
+(`ApplikuBackups/<app>/…`) and the **summary email**, which shows each app
+alongside its id so you can map an id back to a client when restoring.
+
+Because the id is salted with a secret (`ANON_SALT`, or the API token by
+default), outsiders can't reverse the hash to recover your (otherwise guessable)
+app names.
+
 ---
 
 ## Required GitHub secrets
@@ -70,6 +97,7 @@ Do **not** commit them.
 | --- | --- |
 | `APPLIKU_TOKEN` | The Appliku API token (`Authorization: Token <...>`). |
 | `APPLIKU_TEAM` | Your Appliku team slug (the `<TEAM>` in the API paths above). |
+| `ANON_SALT` | *(optional)* Salt for the opaque `db-<hash>` ids. Defaults to `APPLIKU_TOKEN`; set a dedicated random value to keep ids stable across token rotations. |
 | `RCLONE_CONF_B64` | base64 of an `rclone.conf` with a `[gdrive]` drive remote (see below). |
 | `SMTP_USER` | SMTP username for the summary email account. |
 | `SMTP_PASS` | SMTP password / app password. |
@@ -97,6 +125,7 @@ Replace `<owner>/<repo>` with your repository.
 ```bash
 gh secret set APPLIKU_TOKEN   -R <owner>/<repo>   # paste the Appliku API token
 gh secret set APPLIKU_TEAM    -R <owner>/<repo> -b '<your-team-slug>'
+gh secret set ANON_SALT       -R <owner>/<repo> -b "$(openssl rand -hex 16)"   # optional but recommended
 gh secret set SMTP_USER       -R <owner>/<repo>   # paste SMTP username
 gh secret set SMTP_PASS       -R <owner>/<repo>   # paste SMTP password
 gh secret set MAIL_FROM       -R <owner>/<repo> -b 'backups@example.com'
@@ -173,17 +202,19 @@ consent screen is published.
 
 1. **Push the branch** and add the secrets/variables above.
 2. **Test on one app.** Actions → *Appliku DB backups* → **Run workflow**, set
-   `only_app = <your-app>`. Confirm:
+   `only_app = <your-app>` (the app name, slug, or its `db-...` id all work).
+   Confirm:
    - `gdrive:ApplikuBackups/<your-app>/db_<your-app>_*.sql.gz` exists and is
      valid gzip:
      `rclone copyto gdrive:ApplikuBackups/<your-app>/<file> - | gunzip -t && echo OK`
-   - the summary email arrives at `MAIL_TO` (manual runs always email);
+   - the summary email arrives at `MAIL_TO` (manual runs always email) and lists
+     each app next to its `db-...` id;
    - after 48+ runs, prune keeps only the newest 48 (check `rclone lsjson`).
 3. **Test restore (dry run):** Actions → *Appliku DB restore (manual)* →
-   `app = <your-app>`, leave `confirm` blank → downloads + verifies gzip, **no DB
-   writes**.
-4. **Test a real restore into a throwaway DB:** set `app = <your-app>`,
-   `confirm = <your-app>`, `target_url = postgres://…throwaway…`, `wipe = true`.
+   `app = <db-id>` (copy it from the email/Actions tab), leave `confirm` blank →
+   downloads + verifies gzip, **no DB writes**.
+4. **Test a real restore into a throwaway DB:** set `app = <db-id>`,
+   `confirm = <db-id>`, `target_url = postgres://…throwaway…`, `wipe = true`.
    Check the smoke-test row counts in the log/email.
 5. **Go fleet-wide:** the hourly `schedule` is already enabled. Leave `only_app`
    blank for scheduled runs (it only applies to manual dispatch). Watch the
@@ -197,9 +228,9 @@ Workflow **Appliku DB restore (manual)** — inputs:
 
 | Input | Meaning |
 | --- | --- |
-| `app` | App/slug to restore (the `ApplikuBackups/<app>` folder name). |
+| `app` | Database to restore, given as its **opaque id** (`db-...`, from the Actions tab or the email). A real slug/name also works but would show in the dispatch UI. |
 | `file` | Specific dump filename; blank = newest in the folder. |
-| `confirm` | Must equal `app` **exactly** to actually write. Otherwise **dry run**. |
+| `confirm` | Must equal the `app` id **exactly** to actually write. Otherwise **dry run**. |
 | `target_url` | Restore into this Postgres URL instead of the live DB (DR/testing). |
 | `wipe` | `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` before load (clean restore). |
 
@@ -239,6 +270,11 @@ Flip `ALWAYS_EMAIL=true` to get an email every run.
 - **DB URL handling:** `discover.py` keeps connection URLs out of the job matrix
   entirely (each leg re-resolves its own url at runtime) and every leg registers
   an `::add-mask::` before using it, so URLs never surface in logs or the run UI.
+- **No client names on the public surface:** job matrix, job names, logs and
+  artifacts use opaque `db-<hash>` ids only; real names live solely in private
+  Drive folders and the email (see *Anonymization*). Tighten further with
+  Settings → Actions → "Require approval for all outside collaborators" so fork
+  PRs can't run workflows.
 - **Schedule reliability:** GitHub `schedule` is best-effort (can lag minutes)
   and auto-disables after **60 days** of repo inactivity — `keepalive.yml`
   (weekly) prevents that. For tighter timing you can also POST a

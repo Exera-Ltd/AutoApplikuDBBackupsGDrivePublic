@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Assemble the backup-run email summary from per-app status JSON files.
+"""Assemble the backup-run email summary from per-database status JSON files.
+
+Status files are keyed by an opaque id only (the backup runs in a PUBLIC repo
+whose artifacts are world-readable). This script — running in the private email
+channel — maps each id back to its real app name via the Appliku API so the
+emailed table is human-readable. The real names are written ONLY into the HTML
+body (emailed), never to stdout, so the public notify log stays clean.
 
 Reads every status_*.json under a directory (downloaded backup artifacts),
 writes an HTML body to --out, and emits to $GITHUB_OUTPUT:
   subject=...        the email subject line
   send=true|false    whether the notify step should actually send mail
-  failed=N           number of failed apps
+  failed=N           number of failed databases
 
 Send policy (matches the agreed volume control):
   * Any failure                        -> always send (subject "⚠ N FAILED").
@@ -15,6 +21,8 @@ Send policy (matches the agreed volume control):
                                            daily digest, default 06:00Z).
 
 Env:
+  APPLIKU_TOKEN / APPLIKU_TEAM / ANON_SALT   used to map opaque ids -> real
+                                             names for the email (best-effort)
   ALWAYS_EMAIL  "true" to email on every run (default false)
   DIGEST_HOUR   UTC hour for the daily all-success digest (default 6)
   EVENT_NAME    GitHub event name (schedule / workflow_dispatch)
@@ -22,10 +30,27 @@ Env:
   RUN_STARTED   ISO timestamp of the run start (optional, for display)
 """
 import glob
+import html
 import json
 import os
 import sys
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def id_name_map():
+    """id -> real app name, via the Appliku API. Best-effort: {} on any error.
+
+    Must never raise (the email/send decision must still work offline) and must
+    never print a real name to stdout.
+    """
+    try:
+        import discover
+        return discover.id_name_map()
+    except Exception as exc:  # noqa: BLE001 - mapping is purely cosmetic
+        sys.stderr.write("WARN: could not map ids to names (%s)\n" % type(exc).__name__)
+        return {}
 
 STATUS_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 OUT = "body.html"
@@ -50,15 +75,16 @@ def load():
             rows.append(json.load(open(path)))
         except (ValueError, OSError):
             continue
-    # De-dup by app (one artifact per app), keep last seen.
-    by_app = {}
+    # De-dup by opaque id (one artifact per database), keep last seen.
+    by_id = {}
     for r in rows:
-        by_app[r.get("app", "?")] = r
-    return [by_app[k] for k in sorted(by_app)]
+        by_id[r.get("id", "?")] = r
+    return [by_id[k] for k in sorted(by_id)]
 
 
 def main():
     rows = load()
+    names = id_name_map()
     total = len(rows)
     failed = [r for r in rows if not r.get("ok")]
     ok = total - len(failed)
@@ -78,6 +104,9 @@ def main():
     tr = []
     for r in rows:
         good = r.get("ok")
+        oid = r.get("id", "?")
+        # Real name for the email; fall back to the opaque id if unmapped.
+        app = names.get(oid, oid)
         color = "#1a7f37" if good else "#cf222e"
         icon = "✓" if good else "✗"
         size = human(r.get("bytes", 0)) if good else "—"
@@ -85,21 +114,23 @@ def main():
         tr.append(
             "<tr>"
             "<td style='padding:4px 10px'>%s</td>"
+            "<td style='padding:4px 10px;color:#57606a;font-family:monospace'>%s</td>"
             "<td style='padding:4px 10px;color:%s;font-weight:600'>%s %s</td>"
             "<td style='padding:4px 10px;text-align:right'>%s</td>"
             "<td style='padding:4px 10px;text-align:right'>%ss</td>"
             "<td style='padding:4px 10px;color:#cf222e'>%s</td>"
-            "</tr>" % (r.get("app", "?"), color, icon,
+            "</tr>" % (html.escape(str(app)), html.escape(str(oid)), color, icon,
                       "OK" if good else "FAIL", size,
-                      r.get("duration", "?"), detail))
+                      r.get("duration", "?"), html.escape(str(detail))))
 
-    html = """\
+    html_doc = """\
 <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1f2328">
   <h2 style="margin:0 0 4px">Appliku &rarr; Google Drive backup</h2>
   <p style="margin:0 0 12px;color:#57606a">Run started {started} &middot; {ok}/{total} OK &middot; {failedn} failed &middot; total {tot}</p>
   <table style="border-collapse:collapse;border:1px solid #d0d7de;min-width:520px">
     <thead><tr style="background:#f6f8fa">
       <th style="padding:6px 10px;text-align:left">App</th>
+      <th style="padding:6px 10px;text-align:left">ID</th>
       <th style="padding:6px 10px;text-align:left">Status</th>
       <th style="padding:6px 10px;text-align:right">Size</th>
       <th style="padding:6px 10px;text-align:right">Time</th>
@@ -107,15 +138,17 @@ def main():
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
+  <p style="margin:10px 0 0;color:#57606a;font-size:12px">The <b>ID</b> is the
+  public identifier shown in the Actions tab; pass it to the restore workflow.</p>
   <p style="margin:14px 0 0"><a href="{url}">View the workflow run &rarr;</a></p>
 </div>""".format(started=started, ok=ok, total=total, failedn=len(failed),
                  tot=human(total_bytes), rows="".join(tr) or
-                 "<tr><td colspan=5 style='padding:8px;color:#cf222e'>"
+                 "<tr><td colspan=6 style='padding:8px;color:#cf222e'>"
                  "No status files found — discovery or all backup legs failed.</td></tr>",
                  url=run_url or "#")
 
     with open(OUT, "w") as fh:
-        fh.write(html)
+        fh.write(html_doc)
 
     # ---- send decision ----
     event = os.environ.get("EVENT_NAME", "")
