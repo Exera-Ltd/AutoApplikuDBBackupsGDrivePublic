@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Keep only the newest N dumps in an app's Google Drive backup folder.
+"""Keep only the newest N dumps across an app's Google Drive backup folder.
 
 Usage:
   prune.py <app> [keep]
 
-Lists gdrive:ApplikuBackups/<app> via `rclone lsjson`, keeps the newest <keep>
-*.sql.gz files (by filename, which embeds a sortable UTC timestamp, falling back
-to ModTime), and deletes the rest with `rclone deletefile`.
+Dumps live in per-day subfolders: gdrive:ApplikuBackups/<app>/<YYYY-MM-DD>/db_*.sql.gz.
+This lists the app folder RECURSIVELY via `rclone lsjson -R`, keeps the newest
+<keep> *.sql.gz files overall (by filename, which embeds a sortable UTC
+timestamp, falling back to ModTime), deletes the rest with `rclone deletefile`,
+then removes any now-empty date subfolders with `rclone rmdirs`.
 
 Env:
   RCLONE_REMOTE   remote name, default "gdrive"
@@ -31,8 +33,10 @@ def main(argv):
     folder = "%s:%s/%s" % (REMOTE, BASE, app)
 
     try:
+        # -R walks the per-day subfolders; entries carry a "Path" relative to
+        # <folder> (e.g. "2026-06-08/db_app_2026-06-08_0930Z.sql.gz").
         raw = subprocess.check_output(
-            ["rclone", "lsjson", folder], stderr=subprocess.STDOUT)
+            ["rclone", "lsjson", "-R", folder], stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as exc:
         # A missing folder (nothing uploaded yet) is not an error.
         msg = exc.output.decode("utf-8", "replace")
@@ -52,15 +56,20 @@ def main(argv):
     print("prune %s: %d file(s), keeping %d, deleting %d"
           % (app, len(items), len(survivors), len(doomed)))
 
-    failures = 0
     for e in doomed:
-        target = "%s/%s" % (folder, e["Name"])
+        # Delete by full relative Path so files in any date subfolder are found.
+        target = "%s/%s" % (folder, e.get("Path") or e["Name"])
         try:
             subprocess.check_call(["rclone", "deletefile", target])
-            print("  deleted %s" % e["Name"])
+            print("  deleted %s" % (e.get("Path") or e["Name"]))
         except subprocess.CalledProcessError:
-            sys.stderr.write("  WARN: failed to delete %s\n" % e["Name"])
-            failures += 1
+            sys.stderr.write("  WARN: failed to delete %s\n" % (e.get("Path") or e["Name"]))
+
+    # Best-effort: drop date subfolders left empty by the deletions above.
+    if doomed:
+        subprocess.call(["rclone", "rmdirs", folder, "--leave-root"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     # Pruning is best-effort; never fail the backup leg over a stale file.
     return 0
 

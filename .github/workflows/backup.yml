@@ -26,6 +26,12 @@ concurrency:
 permissions:
   contents: read
 
+# Run bundled JavaScript actions (checkout, upload/download-artifact, send-mail)
+# on Node.js 24. Node 20 is deprecated on the runners; this opts in early and
+# silences the deprecation warnings. Becomes the default after 2026-06-16.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   discover:
     runs-on: ubuntu-latest

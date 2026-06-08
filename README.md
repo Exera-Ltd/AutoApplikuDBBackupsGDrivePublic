@@ -35,8 +35,8 @@ backup.yml (cron: hourly + manual)
  │             job output; each leg re-resolves its own url at runtime)
  ├─ backup    → matrix, max-parallel 4, fail-fast off. For each DB:
  │             resolve url → pg_dump | gzip → size/integrity check → rclone copy to
- │             gdrive:ApplikuBackups/<app>/db_<app>_<UTCstamp>.sql.gz →
- │             prune to newest 48. Writes a status_<app>.json artifact.
+ │             gdrive:ApplikuBackups/<app>/<UTC-date>/db_<app>_<UTCstamp>.sql.gz →
+ │             prune to newest 48 (across all dates). Writes a status artifact.
  └─ notify    → if: always(). Merges status artifacts, builds an HTML table,
                emails the configured recipient per the volume policy below.
 
@@ -204,12 +204,13 @@ consent screen is published.
 2. **Test on one app.** Actions → *Appliku DB backups* → **Run workflow**, set
    `only_app = <your-app>` (the app name, slug, or its `db-...` id all work).
    Confirm:
-   - `gdrive:ApplikuBackups/<your-app>/db_<your-app>_*.sql.gz` exists and is
-     valid gzip:
-     `rclone copyto gdrive:ApplikuBackups/<your-app>/<file> - | gunzip -t && echo OK`
+   - a dump exists under a dated subfolder and is valid gzip:
+     `rclone lsf -R gdrive:ApplikuBackups/<your-app>/` shows
+     `<UTC-date>/db_<your-app>_*.sql.gz`;
    - the summary email arrives at `MAIL_TO` (manual runs always email) and lists
      each app next to its `db-...` id;
-   - after 48+ runs, prune keeps only the newest 48 (check `rclone lsjson`).
+   - after 48+ runs, prune keeps only the newest 48 across all dates and removes
+     emptied date folders (check `rclone lsjson -R`).
 3. **Test restore (dry run):** Actions → *Appliku DB restore (manual)* →
    `app = <db-id>` (copy it from the email/Actions tab), leave `confirm` blank →
    downloads + verifies gzip, **no DB writes**.

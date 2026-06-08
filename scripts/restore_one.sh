@@ -58,18 +58,29 @@ SLUG="$(python3 "${here}/discover.py" --name "$TARGET")" || { SLUG=""; die "unkn
 echo "::add-mask::${SLUG}"
 FOLDER="${REMOTE}:${BASE}/${SLUG}"
 
-# ---- resolve target file -------------------------------------------------
-if [ -z "${FILE}" ]; then
-  echo "→ ${TARGET}: resolving newest dump"
-  FILE="$(rclone lsjson "${FOLDER}" 2>/dev/null \
-    | python3 -c 'import json,sys; xs=[e["Name"] for e in json.load(sys.stdin) if not e.get("IsDir") and e["Name"].endswith(".sql.gz")]; print(sorted(xs)[-1] if xs else "")')"
-  [ -n "${FILE}" ] || die "no .sql.gz dumps found for ${TARGET}"
-fi
+# ---- resolve target dump (dumps live in per-day subfolders) --------------
+# REL = path of the dump relative to the app folder (e.g.
+# "2026-06-08/db_app_..sql.gz"); a bare FILE is matched by basename anywhere.
+REL="$(rclone lsjson -R "${FOLDER}" 2>/dev/null \
+  | WANT="${FILE}" python3 -c '
+import json, os, sys
+want = os.environ.get("WANT", "")
+xs = [e for e in json.load(sys.stdin)
+      if not e.get("IsDir") and e["Name"].endswith(".sql.gz")]
+if want:
+    xs = [e for e in xs if want in (e["Name"], e.get("Path") or "")]
+    print((xs[0].get("Path") or xs[0]["Name"]) if xs else "")
+else:
+    xs.sort(key=lambda e: e["Name"])           # filename embeds a sortable UTC stamp
+    print((xs[-1].get("Path") or xs[-1]["Name"]) if xs else "")
+')"
+[ -n "${REL}" ] || die "no matching .sql.gz dump found for ${TARGET}"
+FILE="$(basename "${REL}")"
 echo "  file: ${FILE}"   # real slug inside the name is masked
 
 # ---- download + integrity check (always) ---------------------------------
 echo "→ ${TARGET}: downloading dump"
-rclone copyto "${FOLDER}/${FILE}" "./${FILE}" || die "download failed"
+rclone copyto "${FOLDER}/${REL}" "./${FILE}" || die "download failed"
 gunzip -t "./${FILE}" || die "gzip integrity check failed"
 echo "  gzip OK"
 

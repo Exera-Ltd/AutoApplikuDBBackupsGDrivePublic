@@ -34,8 +34,9 @@ KEEP="${KEEP:-48}"
 MIN_BYTES="${MIN_BYTES:-100}"
 
 STAMP="$(date -u +%Y-%m-%d_%H%MZ)"
+DATE="$(date -u +%Y-%m-%d)"               # per-day subfolder under the app
 FILE="db_${APP}_${STAMP}.sql.gz"          # real name -> private Drive only
-DEST="${REMOTE}:${BASE}/${APP}/${FILE}"
+DEST="${REMOTE}:${BASE}/${APP}/${DATE}/${FILE}"
 STATUS="status_${ID}.json"                # public artifact -> opaque id only
 SECONDS=0
 
