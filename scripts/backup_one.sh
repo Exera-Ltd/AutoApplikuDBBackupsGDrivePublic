@@ -33,8 +33,12 @@ BASE="${RCLONE_BASE:-ApplikuBackups}"
 KEEP="${KEEP:-48}"
 MIN_BYTES="${MIN_BYTES:-100}"
 
-STAMP="$(date -u +%Y-%m-%d_%H%MZ)"
-DATE="$(date -u +%Y-%m-%d)"               # per-day subfolder under the app
+# Timestamps are in Mauritius time (UTC+4, no DST) so the human-readable names
+# match local time and aren't confused at restore. The "MUT" suffix makes the
+# zone explicit. Selection of "newest" for prune/restore uses the file's actual
+# ModTime, so the local-time label is purely cosmetic and never misleads.
+STAMP="$(TZ='Indian/Mauritius' date +%Y-%m-%d_%H%M)MUT"
+DATE="$(TZ='Indian/Mauritius' date +%Y-%m-%d)"   # per-day subfolder (Mauritius)
 FILE="db_${APP}_${STAMP}.sql.gz"          # real name -> private Drive only
 DEST="${REMOTE}:${BASE}/${APP}/${DATE}/${FILE}"
 STATUS="status_${ID}.json"                # public artifact -> opaque id only

@@ -6,9 +6,9 @@ Usage:
 
 Dumps live in per-day subfolders: gdrive:ApplikuBackups/<app>/<YYYY-MM-DD>/db_*.sql.gz.
 This lists the app folder RECURSIVELY via `rclone lsjson -R`, keeps the newest
-<keep> *.sql.gz files overall (by filename, which embeds a sortable UTC
-timestamp, falling back to ModTime), deletes the rest with `rclone deletefile`,
-then removes any now-empty date subfolders with `rclone rmdirs`.
+<keep> *.sql.gz files overall (by actual upload ModTime, falling back to the
+filename), deletes the rest with `rclone deletefile`, then removes any now-empty
+date subfolders with `rclone rmdirs`.
 
 Env:
   RCLONE_REMOTE   remote name, default "gdrive"
@@ -48,8 +48,10 @@ def main(argv):
 
     items = [e for e in json.loads(raw or "[]")
              if not e.get("IsDir") and e.get("Name", "").endswith(".sql.gz")]
-    # Newest first: filename embeds YYYY-MM-DD_HHMMZ so lexical sort == chronological.
-    items.sort(key=lambda e: (e.get("Name", ""), e.get("ModTime", "")), reverse=True)
+    # Newest first by actual upload time (ModTime, UTC). This is timezone- and
+    # naming-scheme-independent, so it stays correct across the UTC->Mauritius
+    # filename change; fall back to the name if ModTime is ever missing.
+    items.sort(key=lambda e: (e.get("ModTime", ""), e.get("Name", "")), reverse=True)
 
     survivors = items[:keep]
     doomed = items[keep:]

@@ -71,7 +71,9 @@ if want:
     xs = [e for e in xs if want in (e["Name"], e.get("Path") or "")]
     print((xs[0].get("Path") or xs[0]["Name"]) if xs else "")
 else:
-    xs.sort(key=lambda e: e["Name"])           # filename embeds a sortable UTC stamp
+    # Newest by actual upload time (ModTime, UTC) — independent of the
+    # filename timezone; fall back to the name if ModTime is missing.
+    xs.sort(key=lambda e: (e.get("ModTime", ""), e["Name"]))
     print((xs[-1].get("Path") or xs[-1]["Name"]) if xs else "")
 ')"
 [ -n "${REL}" ] || die "no matching .sql.gz dump found for ${TARGET}"

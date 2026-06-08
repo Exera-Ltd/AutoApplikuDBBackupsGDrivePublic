@@ -35,8 +35,10 @@ backup.yml (cron: hourly + manual)
  │             job output; each leg re-resolves its own url at runtime)
  ├─ backup    → matrix, max-parallel 4, fail-fast off. For each DB:
  │             resolve url → pg_dump | gzip → size/integrity check → rclone copy to
- │             gdrive:ApplikuBackups/<app>/<UTC-date>/db_<app>_<UTCstamp>.sql.gz →
+ │             gdrive:ApplikuBackups/<app>/<MUT-date>/db_<app>_<stamp>MUT.sql.gz →
  │             prune to newest 48 (across all dates). Writes a status artifact.
+ │             Dates/stamps are Mauritius time (UTC+4); "newest" is chosen by
+ │             actual upload time, so the label is cosmetic and never misleads.
  └─ notify    → if: always(). Merges status artifacts, builds an HTML table,
                emails the configured recipient per the volume policy below.
 

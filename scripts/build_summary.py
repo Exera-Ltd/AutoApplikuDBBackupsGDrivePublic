@@ -34,7 +34,10 @@ import html
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# Mauritius time = fixed UTC+4 (no DST), to match the backup filenames.
+MUT = timezone(timedelta(hours=4))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -98,8 +101,8 @@ def main():
         subject = "[Appliku Backups] OK %d/%d" % (ok, total)
 
     run_url = os.environ.get("RUN_URL", "")
-    started = os.environ.get("RUN_STARTED") or datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%SZ")
+    started = os.environ.get("RUN_STARTED") or datetime.now(MUT).strftime(
+        "%Y-%m-%d %H:%M:%S MUT")
 
     tr = []
     for r in rows:
