@@ -1,0 +1,147 @@
+name: Appliku DB backups
+
+on:
+  # Primary hourly trigger: an external cron (cron-job.org) POSTs a
+  # repository_dispatch of this type every hour. This is reliable, unlike
+  # GitHub's best-effort `schedule`. repository_dispatch follows the normal
+  # email policy (failure + daily digest), not the always-email manual path.
+  repository_dispatch:
+    types: [hourly-backup]
+  # Fallback / belt-and-suspenders: GitHub's own hourly schedule at :23.
+  # Best-effort (often delayed or skipped); concurrency dedupes any overlap.
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      only_app:
+        description: 'Back up a single app only (blank = all apps)'
+        required: false
+        default: ''
+
+# Never let two backup runs overlap; let an in-progress run finish.
+concurrency:
+  group: appliku-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.disc.outputs.matrix }}
+      count: ${{ steps.disc.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enumerate Appliku Postgres databases
+        id: disc
+        env:
+          APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
+          APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          ONLY_APP: ${{ github.event.inputs.only_app }}
+        run: python3 scripts/discover.py
+
+  backup:
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix).include }}
+    name: backup-${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client-17 and rclone
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          # client 17 dumps both PG16 and PG17 servers (pg_dump must be >= server).
+          sudo apt-get install -y -qq postgresql-client-17
+          # The runner ships PG16 at /usr/bin/pg_dump which would otherwise
+          # shadow v17 and fail on PG17 servers ("server version mismatch").
+          # Put the v17 binaries first on PATH for every later step.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          pg_dump --version   # must report 17.x
+          rclone version | head -1
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          echo "$RCLONE_CONF_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes
+
+      - name: Back up ${{ matrix.app }}
+        env:
+          APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
+          APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          KEEP: '48'
+        run: |
+          set -euo pipefail
+          # Resolve the public connection URL at runtime (kept out of the matrix
+          # so it never lands in a job output or the run UI).
+          url="$(python3 scripts/discover.py --resolve "${{ matrix.app }}")"
+          echo "::add-mask::$url"
+          bash scripts/backup_one.sh "${{ matrix.app }}" "$url"
+
+      - name: Upload status artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-${{ matrix.app }}
+          path: status_${{ matrix.app }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  notify:
+    needs: [discover, backup]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download status artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: statuses
+          pattern: status-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Build summary
+        id: sum
+        env:
+          ALWAYS_EMAIL: ${{ vars.ALWAYS_EMAIL || 'false' }}
+          DIGEST_HOUR: ${{ vars.DIGEST_HOUR || '6' }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/build_summary.py statuses --out body.html
+
+      - name: Send email
+        if: ${{ steps.sum.outputs.send == 'true' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ vars.SMTP_HOST }}
+          server_port: ${{ vars.SMTP_PORT || '587' }}
+          secure: false
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: ${{ steps.sum.outputs.subject }}
+          from: DB Backups <${{ secrets.MAIL_FROM }}>
+          to: ${{ secrets.MAIL_TO }}
+          html_body: file://body.html
+
+# (registered with GitHub Actions)

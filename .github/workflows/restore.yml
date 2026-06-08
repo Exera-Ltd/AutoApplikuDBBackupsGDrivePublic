@@ -1,0 +1,101 @@
+name: Appliku DB restore (manual)
+
+# Manual only. By default this is a DRY RUN: it downloads the dump and verifies
+# the gzip, but makes NO database changes. To actually write to a database you
+# must type the app name into "confirm".
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App to restore (the ApplikuBackups/<app> folder name)'
+        required: true
+      file:
+        description: 'Dump filename (blank = newest in the app folder)'
+        required: false
+        default: ''
+      confirm:
+        description: 'Type the app name EXACTLY to perform a real restore (else dry run)'
+        required: false
+        default: ''
+      target_url:
+        description: 'Restore into THIS Postgres URL instead of the live DB (DR / testing)'
+        required: false
+        default: ''
+      wipe:
+        description: 'DROP SCHEMA public CASCADE before restore (clean load)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: appliku-restore-${{ github.event.inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client-17 and rclone
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          # Put v17 binaries ahead of the runner's preinstalled PG16 so psql/pg_dump
+          # match PG17 servers (avoids "server version mismatch").
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          echo "$RCLONE_CONF_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
+
+      - name: Restore
+        id: restore
+        env:
+          APPLIKU_TOKEN: ${{ secrets.APPLIKU_TOKEN }}
+          APPLIKU_TEAM: ${{ secrets.APPLIKU_TEAM }}
+          APP: ${{ github.event.inputs.app }}
+          FILE: ${{ github.event.inputs.file }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+          WIPE: ${{ github.event.inputs.wipe }}
+        run: bash scripts/restore_one.sh
+
+      - name: Build restore email
+        if: always()
+        id: sum
+        env:
+          APP: ${{ github.event.inputs.app }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/restore_email.py
+
+      - name: Email restore outcome
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ vars.SMTP_HOST }}
+          server_port: ${{ vars.SMTP_PORT || '587' }}
+          secure: false
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: ${{ steps.sum.outputs.subject }}
+          from: DB Backups <${{ secrets.MAIL_FROM }}>
+          to: ${{ secrets.MAIL_TO }}
+          html_body: file://body.html
+
+# (registered with GitHub Actions)

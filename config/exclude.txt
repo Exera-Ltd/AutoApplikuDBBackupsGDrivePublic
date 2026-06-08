@@ -1,0 +1,7 @@
+# Appliku app names to EXCLUDE from hourly backups (one per line).
+# Lines starting with '#' and blank lines are ignored.
+# Matched against the Appliku application "name".
+#
+# Examples (uncomment to use):
+# my-staging-app
+# some-demo-app

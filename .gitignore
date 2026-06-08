@@ -1,0 +1,11 @@
+# Never commit secrets or transient backup artifacts
+rclone.conf
+rclone.conf.b64
+*.sql
+*.sql.gz
+status_*.json
+body.html
+token.json
+*.token
+__pycache__/
+*.pyc
